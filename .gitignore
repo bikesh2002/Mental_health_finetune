@@ -1,0 +1,18 @@
+# 1. Virtual Environment (The most important thing to ignore)
+venv/
+.venv/
+
+# 2. Python internals (Auto-generated junk)
+__pycache__/
+*.pyc
+
+# 3. Large Data/Models (Don't upload 2GB models to GitHub!)
+*.pt
+*.bin
+*.pth
+*.jsonl
+data/
+
+# 4. OS/IDE specific
+.vscode/
+.DS_Store
