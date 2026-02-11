@@ -10,7 +10,7 @@ __pycache__/
 *.pt
 *.bin
 *.pth
-*.jsonl
+# *.jsonl
 data/
 
 # 4. OS/IDE specific
