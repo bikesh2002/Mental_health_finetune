@@ -9,9 +9,10 @@ import gc
 import matplotlib.pyplot as plt
 
 # ==========================================
-# 0. PRE-FLIGHT MEMORY CLEARING
+# 0. MEMORY & ENVIRONMENT FIXES
 # ==========================================
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["WANDB_DISABLED"] = "true" # Silences the WandB prompt
 gc.collect()
 torch.cuda.empty_cache()
 
@@ -22,8 +23,6 @@ input_file = "mental_health_chat_finetune.jsonl"
 output_dir = "outputs"
 max_seq_length = 2048 
 load_in_4bit = True  
-
-print(">>> [LOG] LOADING MODEL AND TOKENIZER...")
 
 # ==========================================
 # 2. MODEL LOADING & LORA OPTIMIZATION
@@ -43,14 +42,13 @@ model = FastLanguageModel.get_peft_model(
     lora_alpha = 16,
     lora_dropout = 0.05, 
     bias = "none",
-    use_gradient_checkpointing = "unsloth", # Crucial for OOM
+    use_gradient_checkpointing = "unsloth", 
     random_state = 3407,
 )
 
 # ==========================================
 # 3. DATASET HANDLING
 # ==========================================
-print(">>> [LOG] PREPARING DATASET...")
 tokenizer = get_chat_template(tokenizer, chat_template="llama-3")
 dataset = load_dataset("json", data_files=input_file, split="train")
 dataset = dataset.train_test_split(test_size=0.1)
@@ -63,7 +61,7 @@ def formatting_prompts_func(examples):
 dataset = dataset.map(formatting_prompts_func, batched = True)
 
 # ==========================================
-# 4. TRAINING ARGUMENTS (MEMORY OPTIMIZED)
+# 4. TRAINING ARGUMENTS (UPDATED FOR 2026 FIX)
 # ==========================================
 trainer = SFTTrainer(
     model = model,
@@ -76,10 +74,13 @@ trainer = SFTTrainer(
     packing = False,
     
     args = TrainingArguments(
-        # MEMORY FIX: Batch size 1 + Accumulation 8 = Effective Batch Size 8
+        # CRITICAL 2026 BUG FIXES:
+        average_tokens_across_devices = False, 
+        eval_strategy = "steps", # Modern keyword
+        
         per_device_train_batch_size = 1,
         gradient_accumulation_steps = 8,
-        gradient_checkpointing = True, # Saves ~2GB of VRAM
+        gradient_checkpointing = True,
         
         warmup_steps = 5,
         max_steps = 0,               
@@ -92,14 +93,11 @@ trainer = SFTTrainer(
         save_steps = 100,            
         save_total_limit = 2,        
         load_best_model_at_end = True, 
-        
-        eval_strategy = "steps", 
         eval_steps = 50,             
         report_to = "none", 
-        
         logging_steps = 1,
         output_dir = output_dir,
-        optim = "paged_adamw_8bit", # 'paged' handles memory spikes better
+        optim = "paged_adamw_8bit", # Better memory safety
         weight_decay = 0.01,
         seed = 3407,
     ),
@@ -108,17 +106,10 @@ trainer = SFTTrainer(
 # ==========================================
 # 5. EXECUTION
 # ==========================================
-print(">>> [LOG] TRAINING COMMENCED. THIS VERSION IS TUNED TO AVOID OOM.")
+print(">>> [LOG] TRAINING COMMENCED. 2026 COMPATIBILITY PATCHES APPLIED.")
 trainer_stats = trainer.train()
 
 # ==========================================
-# 6. REPORTING & EXPORT
+# 6. EXPORT
 # ==========================================
-plt.figure(figsize=(10, 5))
-log_history = trainer.state.log_history
-t_steps, t_loss = [e["step"] for e in log_history if "loss" in e], [e["loss"] for e in log_history if "loss" in e]
-plt.plot(t_steps, t_loss, label="Training Loss")
-plt.savefig("final_training_report.png")
-
-print("\n>>> [LOG] SAVING AS GGUF...")
 model.save_pretrained_gguf("final_mental_health_model", tokenizer, quantization_method = "q4_k_m")
