@@ -5,7 +5,15 @@ from transformers import TrainingArguments
 from datasets import load_dataset
 from unsloth.chat_templates import get_chat_template
 import os
+import gc
 import matplotlib.pyplot as plt
+
+# ==========================================
+# 0. PRE-FLIGHT MEMORY CLEARING
+# ==========================================
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+gc.collect()
+torch.cuda.empty_cache()
 
 # ==========================================
 # 1. HARDWARE & PATH SETUP
@@ -35,19 +43,16 @@ model = FastLanguageModel.get_peft_model(
     lora_alpha = 16,
     lora_dropout = 0.05, 
     bias = "none",
-    use_gradient_checkpointing = "unsloth",
+    use_gradient_checkpointing = "unsloth", # Crucial for OOM
     random_state = 3407,
 )
 
 # ==========================================
-# 3. DATASET HANDLING & VALIDATION SPLIT
+# 3. DATASET HANDLING
 # ==========================================
 print(">>> [LOG] PREPARING DATASET...")
-# Unified 2026 Unsloth Template call
 tokenizer = get_chat_template(tokenizer, chat_template="llama-3")
 dataset = load_dataset("json", data_files=input_file, split="train")
-
-# 90/10 split for monitoring over-fitting
 dataset = dataset.train_test_split(test_size=0.1)
 
 def formatting_prompts_func(examples):
@@ -58,7 +63,7 @@ def formatting_prompts_func(examples):
 dataset = dataset.map(formatting_prompts_func, batched = True)
 
 # ==========================================
-# 4. TRAINING ARGUMENTS (2026 STANDARDS)
+# 4. TRAINING ARGUMENTS (MEMORY OPTIMIZED)
 # ==========================================
 trainer = SFTTrainer(
     model = model,
@@ -71,8 +76,11 @@ trainer = SFTTrainer(
     packing = False,
     
     args = TrainingArguments(
-        per_device_train_batch_size = 2,
-        gradient_accumulation_steps = 4,
+        # MEMORY FIX: Batch size 1 + Accumulation 8 = Effective Batch Size 8
+        per_device_train_batch_size = 1,
+        gradient_accumulation_steps = 8,
+        gradient_checkpointing = True, # Saves ~2GB of VRAM
+        
         warmup_steps = 5,
         max_steps = 0,               
         num_train_epochs = 1,        
@@ -85,14 +93,13 @@ trainer = SFTTrainer(
         save_total_limit = 2,        
         load_best_model_at_end = True, 
         
-        # Current 2026 argument names
         eval_strategy = "steps", 
         eval_steps = 50,             
-        report_to = "none", # Silences W&B
+        report_to = "none", 
         
         logging_steps = 1,
         output_dir = output_dir,
-        optim = "adamw_8bit",
+        optim = "paged_adamw_8bit", # 'paged' handles memory spikes better
         weight_decay = 0.01,
         seed = 3407,
     ),
@@ -101,16 +108,8 @@ trainer = SFTTrainer(
 # ==========================================
 # 5. EXECUTION
 # ==========================================
-last_checkpoint = None
-if os.path.isdir(output_dir):
-    checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
-    if checkpoints:
-        checkpoints.sort(key=lambda x: int(x.split("-")[1]))
-        last_checkpoint = os.path.join(output_dir, checkpoints[-1])
-        print(f">>> [LOG] RESUMING FROM: {last_checkpoint}")
-
-print(">>> [LOG] TRAINING COMMENCED. MONITORING LOSS...")
-trainer_stats = trainer.train(resume_from_checkpoint=last_checkpoint)
+print(">>> [LOG] TRAINING COMMENCED. THIS VERSION IS TUNED TO AVOID OOM.")
+trainer_stats = trainer.train()
 
 # ==========================================
 # 6. REPORTING & EXPORT
@@ -121,5 +120,5 @@ t_steps, t_loss = [e["step"] for e in log_history if "loss" in e], [e["loss"] fo
 plt.plot(t_steps, t_loss, label="Training Loss")
 plt.savefig("final_training_report.png")
 
-print("\n>>> [LOG] SAVING AS GGUF (Ready for Ollama/Local use)...")
+print("\n>>> [LOG] SAVING AS GGUF...")
 model.save_pretrained_gguf("final_mental_health_model", tokenizer, quantization_method = "q4_k_m")
