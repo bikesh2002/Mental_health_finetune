@@ -9,24 +9,25 @@ import gc
 import matplotlib.pyplot as plt
 
 # ==========================================
-# 0. MEMORY & ENVIRONMENT FIXES
+# 0. SYSTEM & MEMORY INITIALIZATION
 # ==========================================
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-os.environ["WANDB_DISABLED"] = "true" # Silences the WandB prompt
+os.environ["WANDB_DISABLED"] = "true" 
 gc.collect()
 torch.cuda.empty_cache()
 
 # ==========================================
-# 1. HARDWARE & PATH SETUP
+# 1. CONFIGURATION
 # ==========================================
 input_file = "mental_health_chat_finetune.jsonl" 
-output_dir = "outputs"
+output_dir = "/kaggle/working/outputs"
 max_seq_length = 2048 
 load_in_4bit = True  
 
 # ==========================================
-# 2. MODEL LOADING & LORA OPTIMIZATION
+# 2. MODEL & LORA SETUP
 # ==========================================
+print(">>> [LOG] LOADING MODEL...")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name = "unsloth/llama-3-8b-Instruct-bnb-4bit",
     max_seq_length = max_seq_length,
@@ -47,8 +48,9 @@ model = FastLanguageModel.get_peft_model(
 )
 
 # ==========================================
-# 3. DATASET HANDLING
+# 3. DATASET PREPARATION
 # ==========================================
+print(">>> [LOG] PROCESSING DATASET...")
 tokenizer = get_chat_template(tokenizer, chat_template="llama-3")
 dataset = load_dataset("json", data_files=input_file, split="train")
 dataset = dataset.train_test_split(test_size=0.1)
@@ -61,7 +63,7 @@ def formatting_prompts_func(examples):
 dataset = dataset.map(formatting_prompts_func, batched = True)
 
 # ==========================================
-# 4. TRAINING ARGUMENTS (UPDATED FOR 2026 FIX)
+# 4. TRAINING ARGUMENTS (KAGGLE OPTIMIZED)
 # ==========================================
 trainer = SFTTrainer(
     model = model,
@@ -74,21 +76,24 @@ trainer = SFTTrainer(
     packing = False,
     
     args = TrainingArguments(
-        # CRITICAL 2026 BUG FIXES:
+        # 2026 CRITICAL FIXES
         average_tokens_across_devices = False, 
-        eval_strategy = "steps", # Modern keyword
+        eval_strategy = "steps", 
         
+        # MEMORY MANAGEMENT
         per_device_train_batch_size = 1,
         gradient_accumulation_steps = 8,
         gradient_checkpointing = True,
         
+        # HYPERPARAMETERS
         warmup_steps = 5,
-        max_steps = 0,               
         num_train_epochs = 1,        
         learning_rate = 2e-4,
         fp16 = not torch.cuda.is_bf16_supported(),
         bf16 = torch.cuda.is_bf16_supported(),
         max_grad_norm = 1.0, 
+        
+        # SAVING & LOGGING
         save_strategy = "steps",
         save_steps = 100,            
         save_total_limit = 2,        
@@ -97,19 +102,42 @@ trainer = SFTTrainer(
         report_to = "none", 
         logging_steps = 1,
         output_dir = output_dir,
-        optim = "paged_adamw_8bit", # Better memory safety
+        optim = "paged_adamw_8bit", 
         weight_decay = 0.01,
         seed = 3407,
     ),
 )
 
 # ==========================================
-# 5. EXECUTION
+# 5. TRAINING EXECUTION
 # ==========================================
-print(">>> [LOG] TRAINING COMMENCED. 2026 COMPATIBILITY PATCHES APPLIED.")
-trainer_stats = trainer.train()
+last_checkpoint = None
+if os.path.exists(output_dir):
+    checkpoints = [d for d in os.listdir(output_dir) if d.startswith("checkpoint-")]
+    if checkpoints:
+        checkpoints.sort(key=lambda x: int(x.split("-")[1]))
+        last_checkpoint = os.path.join(output_dir, checkpoints[-1])
+        print(f">>> [LOG] RESUMING FROM: {last_checkpoint}")
+
+print(">>> [LOG] TRAINING COMMENCED...")
+trainer_stats = trainer.train(resume_from_checkpoint=last_checkpoint)
 
 # ==========================================
-# 6. EXPORT
+# 6. GGUF EXPORT (DISK SPACE WORKAROUND)
 # ==========================================
-model.save_pretrained_gguf("final_mental_health_model", tokenizer, quantization_method = "q4_k_m")
+# Use /tmp for intermediate 16-bit merge files to avoid 20GB limit
+tmp_path = "/tmp/gguf_export"
+
+print("\n>>> [LOG] EXPORTING TO GGUF VIA SCRATCH SPACE...")
+model.save_pretrained_gguf(
+    tmp_path, 
+    tokenizer, 
+    quantization_method = "q4_k_m"
+)
+
+# Move only the final quantized GGUF and config to working directory
+!mkdir -p /kaggle/working/final_model
+!cp {tmp_path}/*.gguf /kaggle/working/final_model/
+!cp {tmp_path}/*.json /kaggle/working/final_model/
+
+print("\n>>> [LOG] SUCCESS. MODEL SAVED TO /kaggle/working/final_model")
