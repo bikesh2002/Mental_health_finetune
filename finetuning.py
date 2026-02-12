@@ -3,7 +3,7 @@ import torch
 from trl import SFTTrainer
 from transformers import TrainingArguments
 from datasets import load_dataset
-from unsloth.chat_templates import get_chat_template_tokenizer_formats_func
+from unsloth.chat_templates import get_chat_template
 import os
 import json
 import matplotlib.pyplot as plt
@@ -46,7 +46,7 @@ model = FastLanguageModel.get_peft_model(
 # 3. DATASET HANDLING & VALIDATION SPLIT
 # ==========================================
 print(">>> [LOG] PREPARING DATASET...")
-tokenizer = get_chat_template_tokenizer_formats_func(tokenizer, format="llama-3")
+tokenizer = get_chat_template(tokenizer, chat_template="llama-3")
 dataset = load_dataset("json", data_files=input_file, split="train")
 
 # SPLIT: 90% Training / 10% Validation to detect overfitting
