@@ -1,16 +1,18 @@
-from unsloth import FastLanguageModel
+import os
+import gc
+import shutil
 import torch
+import matplotlib.pyplot as plt
+from unsloth import FastLanguageModel
+from unsloth.chat_templates import get_chat_template
 from trl import SFTTrainer
 from transformers import TrainingArguments
 from datasets import load_dataset
-from unsloth.chat_templates import get_chat_template
-import os
-import gc
-import matplotlib.pyplot as plt
 
 # ==========================================
-# 0. SYSTEM & MEMORY INITIALIZATION
+# 0. SYSTEM & ENVIRONMENT FIXES
 # ==========================================
+# Prevents disk-limit crashes and silences WandB
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["WANDB_DISABLED"] = "true" 
 gc.collect()
@@ -25,9 +27,9 @@ max_seq_length = 2048
 load_in_4bit = True  
 
 # ==========================================
-# 2. MODEL & LORA SETUP
+# 2. MODEL & LORA INITIALIZATION
 # ==========================================
-print(">>> [LOG] LOADING MODEL...")
+print(">>> [LOG] LOADING MODEL AND APPLYING LORA PATCHES...")
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name = "unsloth/llama-3-8b-Instruct-bnb-4bit",
     max_seq_length = max_seq_length,
@@ -48,11 +50,13 @@ model = FastLanguageModel.get_peft_model(
 )
 
 # ==========================================
-# 3. DATASET PREPARATION
+# 3. DATASET HANDLING & TEMPLATING
 # ==========================================
-print(">>> [LOG] PROCESSING DATASET...")
+print(">>> [LOG] PREPARING MENTAL HEALTH DATASET...")
 tokenizer = get_chat_template(tokenizer, chat_template="llama-3")
 dataset = load_dataset("json", data_files=input_file, split="train")
+
+# 10% validation split helps monitor the model's empathy/emulation balance
 dataset = dataset.train_test_split(test_size=0.1)
 
 def formatting_prompts_func(examples):
@@ -63,7 +67,7 @@ def formatting_prompts_func(examples):
 dataset = dataset.map(formatting_prompts_func, batched = True)
 
 # ==========================================
-# 4. TRAINING ARGUMENTS (KAGGLE OPTIMIZED)
+# 4. TRAINING ARGUMENTS (KAGGLE STABLE)
 # ==========================================
 trainer = SFTTrainer(
     model = model,
@@ -76,16 +80,15 @@ trainer = SFTTrainer(
     packing = False,
     
     args = TrainingArguments(
-        # 2026 CRITICAL FIXES
+        # 2026 VERSION FIXES
         average_tokens_across_devices = False, 
         eval_strategy = "steps", 
         
-        # MEMORY MANAGEMENT
+        # MEMORY PROTECTION: Batch 1 + Accum 8 fits 15GB VRAM
         per_device_train_batch_size = 1,
         gradient_accumulation_steps = 8,
         gradient_checkpointing = True,
         
-        # HYPERPARAMETERS
         warmup_steps = 5,
         num_train_epochs = 1,        
         learning_rate = 2e-4,
@@ -93,16 +96,17 @@ trainer = SFTTrainer(
         bf16 = torch.cuda.is_bf16_supported(),
         max_grad_norm = 1.0, 
         
-        # SAVING & LOGGING
+        # SAVING: Checkpoints every 100 steps to survive time-outs
         save_strategy = "steps",
         save_steps = 100,            
         save_total_limit = 2,        
         load_best_model_at_end = True, 
         eval_steps = 50,             
+        
         report_to = "none", 
         logging_steps = 1,
         output_dir = output_dir,
-        optim = "paged_adamw_8bit", 
+        optim = "paged_adamw_8bit", # Handles large-dataset memory spikes
         weight_decay = 0.01,
         seed = 3407,
     ),
@@ -117,16 +121,27 @@ if os.path.exists(output_dir):
     if checkpoints:
         checkpoints.sort(key=lambda x: int(x.split("-")[1]))
         last_checkpoint = os.path.join(output_dir, checkpoints[-1])
-        print(f">>> [LOG] RESUMING FROM: {last_checkpoint}")
+        print(f">>> [LOG] RESUMING FROM PREVIOUS CHECKPOINT: {last_checkpoint}")
 
-print(">>> [LOG] TRAINING COMMENCED...")
+print(">>> [LOG] TRAINING COMMENCED. TARGET: 12,500 ROWS.")
 trainer_stats = trainer.train(resume_from_checkpoint=last_checkpoint)
 
 # ==========================================
-# 6. GGUF EXPORT (DISK SPACE WORKAROUND)
+# 6. PERFORMANCE VISUALIZATION
 # ==========================================
-# Use /tmp for intermediate 16-bit merge files to avoid 20GB limit
-tmp_path = "/tmp/gguf_export"
+plt.figure(figsize=(10, 5))
+log_history = trainer.state.log_history
+t_steps, t_loss = [e["step"] for e in log_history if "loss" in e], [e["loss"] for e in log_history if "loss" in e]
+plt.plot(t_steps, t_loss, label="Training Loss")
+plt.title("Llama-3 Mental Health Model: Training Progress")
+plt.savefig("final_training_report.png")
+
+# ==========================================
+# 7. GGUF EXPORT (DISK SPACE WORKAROUND)
+# ==========================================
+# Export in /tmp to avoid Kaggle's 20GB limit on /working
+tmp_path = "/tmp/gguf_final"
+final_working_dir = "/kaggle/working/final_model"
 
 print("\n>>> [LOG] EXPORTING TO GGUF VIA SCRATCH SPACE...")
 model.save_pretrained_gguf(
@@ -135,9 +150,12 @@ model.save_pretrained_gguf(
     quantization_method = "q4_k_m"
 )
 
-# Move only the final quantized GGUF and config to working directory
-!mkdir -p /kaggle/working/final_model
-!cp {tmp_path}/*.gguf /kaggle/working/final_model/
-!cp {tmp_path}/*.json /kaggle/working/final_model/
+# Native Python move (replacement for bash !cp)
+if not os.path.exists(final_working_dir):
+    os.makedirs(final_working_dir)
 
-print("\n>>> [LOG] SUCCESS. MODEL SAVED TO /kaggle/working/final_model")
+for filename in os.listdir(tmp_path):
+    if filename.endswith(".gguf") or filename.endswith(".json"):
+        shutil.copy(os.path.join(tmp_path, filename), os.path.join(final_working_dir, filename))
+
+print(f"\n>>> [LOG] SUCCESS. MODEL SAVED TO: {final_working_dir}")
