@@ -12,7 +12,6 @@ from datasets import load_dataset
 # ==========================================
 # 0. SYSTEM & ENVIRONMENT FIXES
 # ==========================================
-# Prevents disk-limit crashes and silences WandB
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["WANDB_DISABLED"] = "true" 
 gc.collect()
@@ -55,8 +54,6 @@ model = FastLanguageModel.get_peft_model(
 print(">>> [LOG] PREPARING MENTAL HEALTH DATASET...")
 tokenizer = get_chat_template(tokenizer, chat_template="llama-3")
 dataset = load_dataset("json", data_files=input_file, split="train")
-
-# 10% validation split helps monitor the model's empathy/emulation balance
 dataset = dataset.train_test_split(test_size=0.1)
 
 def formatting_prompts_func(examples):
@@ -67,7 +64,7 @@ def formatting_prompts_func(examples):
 dataset = dataset.map(formatting_prompts_func, batched = True)
 
 # ==========================================
-# 4. TRAINING ARGUMENTS (KAGGLE STABLE)
+# 4. TRAINING ARGUMENTS (DISK-SAFE VERSION)
 # ==========================================
 trainer = SFTTrainer(
     model = model,
@@ -80,15 +77,11 @@ trainer = SFTTrainer(
     packing = False,
     
     args = TrainingArguments(
-        # 2026 VERSION FIXES
         average_tokens_across_devices = False, 
         eval_strategy = "steps", 
-        
-        # MEMORY PROTECTION: Batch 1 + Accum 8 fits 15GB VRAM
         per_device_train_batch_size = 1,
         gradient_accumulation_steps = 8,
         gradient_checkpointing = True,
-        
         warmup_steps = 5,
         num_train_epochs = 1,        
         learning_rate = 2e-4,
@@ -96,17 +89,18 @@ trainer = SFTTrainer(
         bf16 = torch.cuda.is_bf16_supported(),
         max_grad_norm = 1.0, 
         
-        # SAVING: Checkpoints every 100 steps to survive time-outs
+        # --- LATEST SAFETY SETTINGS ---
         save_strategy = "steps",
-        save_steps = 100,            
-        save_total_limit = 2,        
+        save_steps = 200,            # Lower frequency = less disk wear
+        save_total_limit = 1,        # KEEP ONLY 1 CHECKPOINT (Prevents 100% disk usage)
         load_best_model_at_end = True, 
-        eval_steps = 50,             
+        eval_steps = 100,            # Eval less frequently for speed
+        # ------------------------------
         
         report_to = "none", 
         logging_steps = 1,
         output_dir = output_dir,
-        optim = "paged_adamw_8bit", # Handles large-dataset memory spikes
+        optim = "paged_adamw_8bit",
         weight_decay = 0.01,
         seed = 3407,
     ),
@@ -123,7 +117,7 @@ if os.path.exists(output_dir):
         last_checkpoint = os.path.join(output_dir, checkpoints[-1])
         print(f">>> [LOG] RESUMING FROM PREVIOUS CHECKPOINT: {last_checkpoint}")
 
-print(">>> [LOG] TRAINING COMMENCED. TARGET: 12,500 ROWS.")
+print(">>> [LOG] TRAINING COMMENCED.")
 trainer_stats = trainer.train(resume_from_checkpoint=last_checkpoint)
 
 # ==========================================
@@ -137,25 +131,24 @@ plt.title("Llama-3 Mental Health Model: Training Progress")
 plt.savefig("final_training_report.png")
 
 # ==========================================
-# 7. GGUF EXPORT (DISK SPACE WORKAROUND)
+# 7. GGUF EXPORT (DISK RECOVERY MODE)
 # ==========================================
-# Export in /tmp to avoid Kaggle's 20GB limit on /working
-tmp_path = "/tmp/gguf_final"
+print("\n>>> [LOG] TRAINING COMPLETE. CLEARING DISK FOR EXPORT...")
+
+# CRITICAL: We delete the training folder AFTER training is finished 
+# but BEFORE the GGUF merge starts. This frees up 5-10GB of room.
+if os.path.exists(output_dir):
+    shutil.rmtree(output_dir)
+    print(">>> [LOG] DISK SPACE CLEARED.")
+
 final_working_dir = "/kaggle/working/final_model"
 
-print("\n>>> [LOG] EXPORTING TO GGUF VIA SCRATCH SPACE...")
+print("\n>>> [LOG] EXPORTING TO GGUF (4-BIT)...")
 model.save_pretrained_gguf(
-    tmp_path, 
+    final_working_dir, 
     tokenizer, 
-    quantization_method = "q4_k_m"
+    quantization_method = "q4_k_m",
+    maximum_memory_usage = 0.5  # Prevents GPU crashes during saving
 )
 
-# Native Python move (replacement for bash !cp)
-if not os.path.exists(final_working_dir):
-    os.makedirs(final_working_dir)
-
-for filename in os.listdir(tmp_path):
-    if filename.endswith(".gguf") or filename.endswith(".json"):
-        shutil.copy(os.path.join(tmp_path, filename), os.path.join(final_working_dir, filename))
-
-print(f"\n>>> [LOG] SUCCESS. MODEL SAVED TO: {final_working_dir}")
+print(f"\n>>> [LOG] SUCCESS. FINAL MODEL SAVED TO: {final_working_dir}")
